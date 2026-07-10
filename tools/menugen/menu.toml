@@ -1,0 +1,14 @@
+[[item]]
+name = "Margherita"
+price = 12.5
+tags = "vegetarian"
+
+[[item]]
+name = "Carbonara"
+price = 14.0
+tags = "classic"
+
+[[item]]
+name = "Tiramisu"
+price = 7.0
+tags = "dessert"
