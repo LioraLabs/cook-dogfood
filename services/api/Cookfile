@@ -1,0 +1,14 @@
+import menugen //tools/menugen
+
+probe dotnet:tools
+    tools { dotnet }
+
+recipe build
+    ingredients "Api/*.cs" "Api/Api.csproj"
+    seal dotnet:tools
+    cook "build/api-build.stamp" { dotnet build Api/Api.csproj --nologo -v q && mkdir -p build && echo ok > $<out> } local
+
+recipe tests: build menugen.menu
+    ingredients "Api.Tests/*.cs" "Api.Tests/Api.Tests.csproj" "Api/*.cs"
+    seal dotnet:tools
+    test { MENU_JSON="$(realpath $<menugen.menu>)" dotnet test Api.Tests/Api.Tests.csproj --nologo -v q }
