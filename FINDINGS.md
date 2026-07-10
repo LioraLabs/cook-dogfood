@@ -335,3 +335,5 @@ analysis: recipe-level `: dep` headers are ordering-only edges unless the body r
 directly; fan-out member identity (the `pnpm:packages` probe) fingerprints the *member list*, not
 each member's source tree, so this Cookfile's dependency shape is deliberately coarse and can report
 false-cached on real per-package source edits.
+
+- [core-ergonomics] `client`'s `cp $<contracts.gen> $<out>` step (the first of its two `cook` steps) re-runs on an unrelated `tsconfig.json` edit because recipe-level `ingredients` binds only to the recipe's first `cook` step (see the multi-step `ingredients`-scoping finding above) — a `tsconfig.json` change re-invokes the harmless `cp`, not just the `tsc` step that actually cares. Harmless (the `cp` step's output content is unaffected, so early cutoff still spares the downstream `tsc` step), but worth flagging as one more surface of the same root cause.

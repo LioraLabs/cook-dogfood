@@ -36,6 +36,7 @@ recipe bundle: ui menudata deps
 
 recipe typecheck: deps client ui menudata
     ingredients pnpm:packages
+    seal web:tools
     cook "build/typecheck/$<in.dir>.stamp" { : $<client> $<ui> $<menudata> $<deps> && mkdir -p "$(dirname $<out>)" && pnpm --filter "$<in.name>" exec tsc -p . --noEmit && echo ok > $<out> }
 
 recipe smoke: bundle
