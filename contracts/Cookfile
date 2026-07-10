@@ -1,0 +1,7 @@
+probe py:tools
+    tools { python3 }
+
+recipe gen
+    ingredients "menu-api.yaml" "../scripts/gen_client.py"
+    seal py:tools
+    cook "build/menuClient.ts" { mkdir -p build && python3 ../scripts/gen_client.py menu-api.yaml $<out> }
