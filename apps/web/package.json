@@ -1,0 +1,8 @@
+{
+  "name": "@plateboard/web",
+  "private": true,
+  "devDependencies": {
+    "typescript": "^5.8.0",
+    "esbuild": "^0.25.0"
+  }
+}

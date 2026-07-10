@@ -1,0 +1,7 @@
+{
+  "name": "@plateboard/ui",
+  "version": "0.0.0",
+  "main": "dist/board.js",
+  "types": "dist/board.d.ts",
+  "dependencies": { "@plateboard/client": "workspace:*" }
+}

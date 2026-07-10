@@ -1,0 +1,6 @@
+{
+  "name": "@plateboard/client",
+  "version": "0.0.0",
+  "main": "dist/menuClient.js",
+  "types": "dist/menuClient.d.ts"
+}
