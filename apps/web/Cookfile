@@ -22,7 +22,7 @@ recipe client: contracts.gen deps
 recipe ui: client deps
     ingredients "packages/ui/src/*.ts" "packages/ui/tsconfig.json" "packages/ui/package.json"
     seal web:tools
-    cook "packages/ui/dist/board.js" "packages/ui/dist/board.d.ts" { pnpm --filter @plateboard/ui exec tsc -p . }
+    cook "packages/ui/dist/board.js" "packages/ui/dist/board.d.ts" { : $<client> && pnpm --filter @plateboard/ui exec tsc -p . }
 
 recipe menudata: menugen.menu
     cook "app/src/menu.json" { mkdir -p app/src && cp $<menugen.menu> $<out> }
@@ -30,12 +30,12 @@ recipe menudata: menugen.menu
 recipe bundle: ui menudata deps
     ingredients "app/src/main.ts" "app/tsconfig.json" "app/package.json"
     seal web:tools
-    cook "app/dist/bundle.js" { pnpm --filter @plateboard/app exec esbuild src/main.ts --bundle --format=esm --outfile=dist/bundle.js --log-level=warning }
+    cook "app/dist/bundle.js" { : $<ui> $<menudata> && pnpm --filter @plateboard/app exec esbuild src/main.ts --bundle --format=esm --outfile=dist/bundle.js --log-level=warning }
 
 recipe typecheck: deps client ui menudata
     ingredients pnpm:packages
-    cook "build/typecheck/$<in.dir>.stamp" { mkdir -p "$(dirname $<out>)" && pnpm --filter "$<in.name>" exec tsc -p . --noEmit && echo ok > $<out> }
+    cook "build/typecheck/$<in.dir>.stamp" { : $<client> $<ui> $<menudata> && mkdir -p "$(dirname $<out>)" && pnpm --filter "$<in.name>" exec tsc -p . --noEmit && echo ok > $<out> }
 
 recipe smoke: bundle
     ingredients "app/test/smoke.mjs"
-    test { node app/test/smoke.mjs }
+    test { : $<bundle> && node app/test/smoke.mjs }
