@@ -27,6 +27,15 @@ gets recorded here as a module line item, then written inline anyway.
 - [core-bug] `local`-disposition cache is single-slot, not a true multi-version content-addressed history: for a unit with `local` (opts out of the shared store per the Standard, §{exec.cache.sharing}), the on-disk local index (`.cook/cache/build.toml`) retains exactly one recorded input/output fingerprint per unit-id, overwritten on every rebuild — so alternating a sealed ingredient between two previously-seen contents (A → B → A) forces a real rebuild on *every* transition, never hitting a "we've built this exact input combination before" shortcut, even though the *default* (non-`local`) disposition does retain that history via the shared content-addressed store and serves an immediate hit on revert. Minimal isolated repro (no dotnet involved) in a scratch `.cookroot` dir: `recipe build\n  ingredients "in.txt"\n  cook "build/out.stamp" { mkdir -p build && echo ok > $<out> } local` — writing `in.txt`=A, building (fresh), building again (`cached`), writing `in.txt`=B, building (fresh, `.cook/cache/build.toml` now holds only B's fingerprint), reverting `in.txt` to A, building: **misses and rebuilds** even though A was cached moments earlier. The identical sequence with the `local` keyword removed hits immediately on the A→B→A revert (shared-store path retains full history). Observed for real in `services/api/build`: after the Task-7 edge-1 invalidation test (editing then reverting `Api/Program.cs`), the first `cook build` post-revert cost a full rebuild despite the original content having been cached at the very start of this task. Not necessarily a spec violation — the Standard only promises `local` is "cached in the local index," not that the local index retains full history — but it's a sharp, non-obvious edge for exactly the case `local` was chosen for here (a non-shareable dotnet build artifact): any workflow that flips between two states repeatedly (e.g. switching git branches back and forth during review, or a CI matrix that shares a local-only cache dir across a small rotation of configurations) gets zero benefit from `local` caching beyond "the immediately preceding state," which is a much weaker guarantee than the "content-addressed, so it never rebuilds the same input twice" story the rest of cook's caching model advertises. Worth either documenting this bound explicitly in the `local` disposition docs, or (better) widening the local index to retain more than one fingerprint per unit-id the same way the shared store does.
 - [core-ergonomics] `cook test` invoked bare (no scope argument) from `services/api/` runs **every** test recipe reachable in the whole workspace, not just the ones declared in or reachable from `services/api/Cookfile`: it discovered and ran `tools/menugen`'s `check` recipe (a `test` step recipe, imported transitively via `menugen.menu`'s dependency edge, though `tests` itself never lists `menugen.check` as a dependency) alongside `services/api`'s own `tests` recipe, reporting them together as `test result: ok. 2 passed`. This is workspace-wide test aggregation, not recipe-scoped — `cook test tests` (positional `SCOPE` argument, documented in `cook test --help`) correctly narrows to just the one recipe (`test result: ok. 1 passed`). Also notable: the default summary line reports at *cook test-unit* granularity, not xunit-fact granularity — "1 passed" for the `tests` recipe means "the one cached test-unit (the whole `dotnet test` invocation) passed," not "1 of however-many xunit `[Fact]`s passed." The underlying xunit detail (`Passed! - Failed: 0, Passed: 2, Skipped: 0, Total: 2`) is real and captured — confirmed via `--report-json`, which embeds the full `dotnet test` stdout per test-unit — but is invisible in the default terminal summary unless a test fails, `-v` is passed, or `--report-json`/`--report-junit` is requested. Anyone wiring CI off the plain terminal summary should know "N passed" is recipe/test-unit count, not underlying-framework assertion count.
 - [module:pnpm] Hand-run chain (`pnpm install` → `tsc -p .` for `client`/`ui` → `esbuild --bundle --format=esm` for `app` → `node smoke.mjs`) went green first try with zero TS/esbuild config fixes needed — the `moduleResolution: "bundler"` + type-only `import type { MenuItem } from "@plateboard/client"` in `ui/src/board.ts` resolved workspace-linked `@plateboard/client`'s `.d.ts` correctly via pnpm's symlinked `node_modules`, and `app/src/main.ts`'s `import menu from "./menu.json"` under `resolveJsonModule: true` typed cleanly against `renderBoard(items: MenuItem[])` with no cast needed (none of the anticipated gotchas materialized). Two non-blocking pieces of friction worth a `cook_pnpm` module owning: (1) `pnpm install` printed `Ignored build scripts: esbuild@0.25.12` / `Run "pnpm approve-builds" ...` — esbuild's postinstall (which normally validates/registers its platform-specific prebuilt binary) is skipped by pnpm's default lifecycle-script sandboxing, yet `esbuild --version` and the real bundle both worked fine (the optional-dependency binary was installed regardless), so this is a red herring warning in this case but a `cook_pnpm` module's toolchain probe should either pre-approve known-safe build scripts (`pnpm.approve-builds`) or explicitly verify the binary is runnable rather than trust silence; a case where the ignored script *is* load-bearing would fail identically-looking but actually be broken. (2) running the esbuild-produced `dist/bundle.js` with plain `node` emits a `MODULE_TYPELESS_PACKAGE_JSON` warning (stderr, non-fatal, exit 0) because `app/package.json` has no `"type": "module"` field while the bundle is ESM (`--format=esm`); a `cook_pnpm` `esbuild.bundle()` target-maker should either default `--format=cjs` for un-typed packages or document that ESM-format consumers need `"type": "module"` in the nearest `package.json` to avoid Node's reparse-and-warn path.
+- [module:pnpm] `pnpm.workspace_packages()` probe (written before authoring `apps/web/Cookfile`'s `pnpm:packages` probe, per the module-boundary rule): the gnarly probe body needed here is a `node -e` one-liner that reads `pnpm-workspace.yaml`'s package globs (hand-expanded to `packages/*` + `app` rather than actually parsing the YAML — a real implementation would need a YAML parser or `pnpm ls -r --json`), filters to dirs with a `package.json`, and emits `[{name, dir}, ...]` as JSON on stdout for the `json {}` probe producer to parse. This exact shape — enumerate workspace member dirs, read each `package.json`'s `name` field, emit a `{name, dir}` record array — is something every pnpm/npm/yarn-workspace Cookfile will need for per-package fan-out (typecheck, lint, per-package test, per-package publish), and hand-rolling it against `fs.readdirSync`+glob-by-hand is fragile (it silently misses nested/scoped package dirs, doesn't honor negated globs, and would need updating if `pnpm-workspace.yaml`'s `packages:` list changes shape). A `cook_pnpm` module should ship this as a pre-declared probe (e.g. `pnpm:packages`, populated via `pnpm ls -r --json --depth -1` under the hood, which pnpm already exposes) so consuming Cookfiles just write `ingredients pnpm:packages` without reimplementing workspace-glob resolution in a shell one-liner.
+- [module:pnpm] Install-stamp idiom (`deps` recipe, `apps/web/Cookfile`): `pnpm install --frozen-lockfile --silent && mkdir -p build && echo ok > $<out>` mirrors the `dotnet build`/stamp pattern from Task 7 — `node_modules` is a large, pnpm-managed tree that is not itself a cook-declared output (an undeclared side-effect directory every downstream recipe implicitly depends on existing), the pnpm content-addressable store under `~/.local/share/pnpm/store` (or platform equivalent) is ambient machine state, and `--frozen-lockfile` is the discipline that makes the install deterministic *given* the lockfile rather than resolving ranges fresh. `pnpm-lock.yaml` is listed as an `ingredients` file so a lockfile edit invalidates the stamp; `local` disposition is correct for the same reason as the dotnet case — the stamp's provenance includes ambient machine/network state (registry fetch, local store population) that shouldn't be shared fleet-wide as if reproducible. A `cook_pnpm` module's `pnpm.install()` target-maker should own this whole shape (frozen-lockfile flag, stamp path, `local` disposition, lockfile-as-ingredient) so it isn't hand-copied per Cookfile the way the dotnet and rust toolchain idioms already are (see Task 3/7 findings above).
+- [module:pnpm] Per-package dep topology is the sharpest gap this task surfaced: `typecheck: deps client ui menudata` lists all three builder recipes as dependencies purely for **ordering** (so `client`'s generated `src/menuClient.ts` + `dist/`, `ui`'s `dist/`, and `menudata`'s `app/src/menu.json` all exist on disk before any member's `tsc -p . --noEmit` runs, since `@plateboard/ui`'s tsc needs `@plateboard/client`'s `.d.ts` and `@plateboard/app`'s tsc needs `@plateboard/ui`'s `.d.ts`), not for cache coupling — and because the `typecheck` recipe body never references `$<client>`, `$<ui>`, or `$<menudata>` as placeholders (only `$<in.name>`/`$<in.dir>` from the `pnpm:packages` fan-out and `$<out>`), those dependency edges carry **zero fingerprint weight**. See the invalidation-edge evidence below: editing `packages/ui/src/board.ts` re-ran `ui`'s own build but left all three `typecheck` fan-out stamps `cached`, meaning `pnpm --filter @plateboard/ui exec tsc -p . --noEmit` was *not* re-run against the changed source even though the source is inside `packages/ui/src/*.ts` — a path that exists nowhere in `typecheck`'s own `ingredients` (only the `pnpm:packages` probe, which fingerprints the *package list*, i.e. `{name, dir}` tuples, not each package's source tree). This is real staleness risk, not just coarseness: `cook typecheck` can report all-cached green while a member's actual type errors from an edited file go undetected, because the *only* thing coupled to cook's fan-out unit fingerprint is "does this package still exist in the workspace list," not "did this package's sources change." A `cook_pnpm` module should derive the real package dependency graph (each member's `dependencies`/`devDependencies` restricted to workspace-linked siblings, resolvable from `pnpm-workspace.yaml` + each `package.json`, or via `pnpm ls -r --json` which already reports the graph) and use it to build **per-member** `ingredients` sets (a member's own `src/**` plus its transitive workspace-internal dependencies' `src/**`/`dist/**`), rather than the single coarse "depend on every builder, fingerprint on the member list only" shape used here. This is exactly the datapoint the task asked to record rather than hand-fix inline.
+- [module:generic] Copy-artifact-into-consumer-source-tree idiom, two instances in this Cookfile: `client`'s `mkdir -p packages/client/src && cp $<contracts.gen> $<out>` (copying a codegen'd `.ts` file from another Cookfile's build dir into this package's own `src/` so its own `tsc` compiles it as first-party source) and `menudata`'s `mkdir -p app/src && cp $<menugen.menu> $<out>` (same shape, copying `tools/menugen`'s generated `menu.json` into `app/src/` so `resolveJsonModule` picks it up as a same-tree import). Both are "another Cookfile produced an artifact; this package needs it to physically live inside its own `src/` for the local toolchain (tsc rootDir, bundler resolution) to see it as first-party, not `node_modules`-linked" — a shape that will recur any time codegen output needs to be copied across a package boundary rather than published/linked as a dependency. A `cook_generic` helper (`fs.copy_into(dep_output, dest)`, owning the `mkdir -p $(dirname dest)` + `cp` pairing) would remove the repeated boilerplate; not filed as a `module:pnpm`-specific item because neither instance is pnpm-specific (the same shape would apply to any language's codegen-into-src idiom).
+- [module:generic] Multi-output dist declaration vs stamp files: both `client`'s and `ui`'s tsc steps declare `cook "<dist>/x.js" "<dist>/x.d.ts" { tsc ... }` (the real two files tsc emits), rather than collapsing to a single stamp the way the dotnet/pnpm-install recipes do — and cook's stale-output reconciliation genuinely verified both declared paths exist after the run (confirmed by direct `ls`: `packages/client/dist/{menuClient.js,menuClient.d.ts}` and `packages/ui/dist/{board.js,board.d.ts}` all present after a cold `bundle` run). This is the *better* idiom when the tool's output set is small, static, and known in advance (unlike `dotnet build`'s deep, non-enumerable `bin`/`obj` tree) — it lets cook track the real artifacts instead of a proxy stamp, at the cost of the Cookfile author having to enumerate outputs by hand and keep the list in sync with the compiler's actual emit set (e.g. this list would need updating if `tsconfig.json` added `declarationMap` or `sourceMap`, which emit additional files tsc writes silently and cook wouldn't know to expect or verify). Worth a `cook_pnpm`/`cook_tsc` module owning `tsc.project(dir)` as a target-maker that introspects `tsconfig.json`'s `outDir`+`rootDir`+`declaration`/`sourceMap` flags to compute the exact expected output set rather than requiring each Cookfile author to hand-enumerate it.
+- Cross-Cookfile placeholder expansion datapoint (`client`'s `cp $<contracts.gen> $<out>`, `apps/web/Cookfile` importing `contracts //contracts`): confirmed via the build event log (`.cook/logs/*/events.jsonl`, `node-started` event for the `client` recipe's first cook step) that `$<contracts.gen>` expands to the literal string `../../contracts/build/menuClient.ts` — i.e. relative to `apps/web` (the *consuming* Cookfile's directory, two hops from the repo root), not an absolute path, not workspace-root-relative, and not relative to `contracts/` (the *producing* Cookfile's directory). This is consistent with the Task 3/7 finding that `$<dep>` placeholders are always bare-relative-to-the-referencing-Cookfile's-cwd, generalized here to a placeholder qualified with an *imported* recipe's namespace (`contracts.gen`, sigil-imported via `//contracts`) rather than a same-Cookfile or directory-hopped-import (`menugen.menu`) dependency — no new shape, no caveat, the relative-path-computed-from-consumer-cwd rule holds uniformly across same-file deps, directory-hopped imports, and workspace-root-sigil imports alike. The `cp` worked with zero adjustment; no `realpath` was needed here (unlike the Task 7 `MENU_JSON` env-var case) because `cp`'s own cwd during the step is already `apps/web` (the Cookfile's directory) and the relative path is correct from that same cwd — the earlier case only needed `realpath` because `dotnet test` forked a subprocess with a *different* cwd than the Cookfile's.
+- Fan-out invalidation observation (edit `packages/ui/src/board.ts`, append `export const BOARD_VERSION = 1;`, run `cook bundle` then `cook typecheck`): **exactly one** unit re-ran across both invocations — `ui`'s own `dist/board.js`+`dist/board.d.ts` tsc step (correctly, since `packages/ui/src/*.ts` is a direct glob `ingredients` of the `ui` recipe). Everything downstream stayed `cached`: `bundle/bundle.js` (depends on `ui` via the recipe-level `: ui menudata deps` header but never references `$<ui>` in its body — confirmed stale by direct inspection, `app/dist/bundle.js`'s mtime predated the edit and `grep -c BOARD_VERSION app/dist/bundle.js` = 0 even though `packages/ui/dist/board.js` — the file esbuild's bundler actually resolves through `node_modules` — did contain the new symbol) and all three `typecheck` fan-out stamps (`build/typecheck/{app,packages/client,packages/ui}.stamp`, all cached with mtimes predating the edit — `pnpm --filter @plateboard/ui exec tsc -p . --noEmit` was never re-invoked against the changed `board.ts`, despite that file being the fan-out unit's own package source, because `typecheck`'s only declared `ingredients` is the `pnpm:packages` probe fingerprinting the `{name,dir}` *list*, not each member's source tree). This confirms the mechanism precisely: a recipe-level `: dep1 dep2` header is an **ordering-only** edge unless the body actually references `$<dep>` as a placeholder (compare Task 7's edge-2 finding, where `tests: build menugen.menu` DID couple because the body used `$<menugen.menu>` directly) — recipe dependency + fan-out member identity do NOT automatically fold a listed dependency's rebuilt *content* into a consuming unit's cache fingerprint. Reverting `packages/ui/src/board.ts` and re-running `cook bundle` hit the shared content-addressed store immediately (`ui/board.js cached` on the very next run, matching the earlier revert-hits-immediately finding for non-`local` recipes) confirming no state was left dangling by the stale-cache episode; git working tree confirmed clean after the revert.
+- [core-ergonomics] Fan-out unit display-label truncation, cosmetic only: the live build log's node label for the `typecheck` fan-out shows just `typecheck/client.stamp`, `typecheck/ui.stamp`, `typecheck/app.stamp` — but the actual declared/produced paths are `build/typecheck/packages/client.stamp`, `build/typecheck/packages/ui.stamp`, `build/typecheck/app.stamp` (confirmed via direct `ls`; the `packages/` path segment from `$<in.dir>` is present on disk but dropped from the printed label, which instead shows only the output pattern's basename-like tail). Not a correctness issue (the files exist at the right paths, `cook why`/cache keys are unaffected) but a real diagnosability wrinkle for exactly the case fan-out is meant to make legible: a user scanning the live log to confirm "did the `packages/client` member's typecheck run" sees a label indistinguishable from a flat, non-nested member.
+- No JS-brace-vs-cook-brace-lexer issue: the `pnpm:packages` probe's `json { node -e '...' }` body contains multiple `{`/`}` pairs (object literals, arrow-less function bodies in the `.map()`/`.filter()` chain) nested inside cook's own `{ }` producer-body delimiters, and it parsed and ran correctly on the first attempt with no simplification needed — cook's brace-balance lexer for shell-body producers handles balanced-brace JS content transparently. Recorded per the task's instruction to note this either way; no `[core-bug]` filed since nothing broke.
 
 ## Verification evidence
 
@@ -171,3 +180,127 @@ test tests@14 ... ok (cached)
 
 test result: ok. 2 passed (2 cached); finished in 0.1s
 ```
+
+### Task 9 — apps/web/Cookfile
+
+```
+$ cd apps/web
+$ rm -rf packages/client/src packages/client/dist packages/ui/dist app/dist app/src/menu.json build
+$ cook bundle
+  contracts.gen            queued  (2 nodes)
+  deps                     queued  (2 nodes)
+  menugen.build            queued  (2 nodes)
+  client                   queued  (2 nodes)
+  menugen.menu             queued  (1 nodes)
+  ui                       queued  (2 nodes)
+  menudata                 queued  (1 nodes)
+  bundle                   queued  (2 nodes)
+  contracts.gen/$probe:py:tools                         0.00s
+  contracts.gen/menuClient.ts                           cached
+  contracts.gen            done     (1/2 cached)             1.60s
+  menugen.build/$probe:rust:tools                       0.00s
+  menugen.build/menugen                                 cached
+  menugen.build            done     (1/2 cached)             0.02s
+  menugen.menu/menu.json                               cached
+  menugen.menu             done     (1/1 cached)             0.00s
+  deps/$probe:web:tools                        0.00s
+  menudata/menu.json                               0.00s
+  menudata                 done     (1/1)                    0.00s
+  deps/pnpm-install.stamp                      0.00s
+  deps                     done     (2/2)                    0.34s
+  client/menuClient.ts                           0.00s
+  client/menuClient.js                           0.00s
+  client                   done     (2/2)                    0.49s
+  ui/$probe:web:tools                        cached
+  ui/board.js                                0.00s
+  ui                       done     (1/2 cached)             0.47s
+  bundle/$probe:web:tools                        cached
+  bundle/bundle.js                               0.00s
+  bundle                   done     (1/2 cached)             0.24s
+cook done in 6.16s (14 nodes, 1 cached recipes, 8 done)
+# both declared outputs of every multi-output tsc step confirmed present via `ls`:
+# packages/client/dist/{menuClient.js,menuClient.d.ts}, packages/ui/dist/{board.js,board.d.ts}
+
+$ cook typecheck
+  ...
+  typecheck/client.stamp                            0.00s
+  typecheck/app.stamp                               0.00s
+  typecheck/ui.stamp                                0.00s
+  typecheck                done     (3/3)                    0.49s
+cook done in 3.55s (15 nodes, 5 cached recipes, 8 done)
+# 3 fan-out units confirmed on disk at:
+#   build/typecheck/app.stamp
+#   build/typecheck/packages/client.stamp
+#   build/typecheck/packages/ui.stamp
+# (see [core-ergonomics] label-truncation finding above -- the live log shows the short
+# names "client.stamp"/"ui.stamp"/"app.stamp", not the actual nested "packages/..." paths)
+
+$ cook bundle && cook typecheck   # all cached, second pass
+  ... bundle: (14 nodes, 6 cached recipes, 8 done), all leaf nodes "cached"
+  ... typecheck: (15 nodes, 6 cached recipes, 8 done), all 3 stamps "cached"
+
+$ cook test
+running tests
+test check@15 [menu.toml] ... ok (cached)
+test smoke@41 ... ok
+test result: ok. 2 passed (1 cached); finished in 4.6s
+# workspace-wide aggregation again pulled in menugen's `check` test recipe, consistent
+# with the Task 7 finding; `smoke` itself was NOT cached on this first `cook test`
+# invocation for apps/web (no prior test-scoped run had ever recorded it), which is
+# expected -- `bundle` being cached does not imply the `smoke` *test* unit was cached.
+
+$ cook test   # re-run, no edits
+running tests
+test check@15 [menu.toml] ... ok (cached)
+test smoke@41 ... ok (cached)
+test result: ok. 2 passed (2 cached); finished in 4.5s
+```
+
+Invalidation edge — `packages/ui/src/board.ts` (append `export const BOARD_VERSION = 1;`):
+
+```
+$ echo "export const BOARD_VERSION = 1;" >> packages/ui/src/board.ts
+$ cook bundle
+  ...
+  ui/board.js                                0.00s
+  ui                       done     (1/2 cached)             0.46s
+  bundle/bundle.js                               cached
+  bundle                   done     (2/2 cached)             0.00s
+# ui rebuilt (correctly -- packages/ui/src/*.ts is its own glob ingredient);
+# bundle stayed cached even though it depends on ui (recipe header) -- bundle's body
+# never references $<ui>, so no fingerprint coupling exists
+
+$ cook typecheck
+  ...
+  typecheck/client.stamp                            cached
+  typecheck/ui.stamp                                cached
+  typecheck/app.stamp                               cached
+  typecheck                done     (3/3 cached)             0.00s
+# all 3 fan-out stamps stayed cached, including the "ui" member itself -- typecheck's
+# only ingredient is the pnpm:packages probe (fingerprints the {name,dir} list, not
+# each member's source tree), so editing packages/ui/src/board.ts is invisible to it
+
+# direct confirmation the cache was actually stale, not just quiet:
+$ stat -c '%Y %n' app/dist/bundle.js packages/ui/dist/board.js \
+    build/typecheck/app.stamp build/typecheck/packages/ui.stamp
+1783697841 app/dist/bundle.js            # older -- NOT rebuilt
+1783697937 packages/ui/dist/board.js     # newer -- rebuilt
+1783697882 build/typecheck/app.stamp     # predates the board.js rebuild
+1783697882 build/typecheck/packages/ui.stamp   # predates the board.js rebuild
+$ grep -c BOARD_VERSION packages/ui/dist/board.js   # 1 -- new symbol present
+$ grep -c BOARD_VERSION app/dist/bundle.js          # 0 -- stale bundle never saw it
+
+$ git checkout packages/ui/src/board.ts
+$ cook bundle
+  ...
+  ui/board.js                                cached   # revert hit the shared store immediately
+  bundle/bundle.js                               cached
+  bundle                   done     (2/2 cached)             0.00s
+$ git status --short   # clean
+```
+
+See the "Fan-out invalidation observation" and "Per-package dep topology" log entries above for the
+analysis: recipe-level `: dep` headers are ordering-only edges unless the body references `$<dep>`
+directly; fan-out member identity (the `pnpm:packages` probe) fingerprints the *member list*, not
+each member's source tree, so this Cookfile's dependency shape is deliberately coarse and can report
+false-cached on real per-package source edits.
