@@ -13,16 +13,18 @@ probe pnpm:packages
 recipe deps
     ingredients "package.json" "pnpm-lock.yaml" "pnpm-workspace.yaml" "packages/*/package.json" "app/package.json"
     seal web:tools
-    cook "build/pnpm-install.stamp" { pnpm install --frozen-lockfile --silent && mkdir -p build && echo ok > $<out> } local
+    cook "build/pnpm-install.stamp" { pnpm install --frozen-lockfile --silent && mkdir -p build && { sha256sum pnpm-lock.yaml; pnpm exec tsc --version; pnpm exec esbuild --version; } > $<out> } local
 
 recipe client: contracts.gen deps
+    ingredients "packages/client/tsconfig.json" "packages/client/package.json"
+    seal web:tools
     cook "packages/client/src/menuClient.ts" { mkdir -p packages/client/src && cp $<contracts.gen> $<out> }
-    cook "packages/client/dist/menuClient.js" "packages/client/dist/menuClient.d.ts" { pnpm --filter @plateboard/client exec tsc -p . }
+    cook "packages/client/dist/menuClient.js" "packages/client/dist/menuClient.d.ts" { : $<deps> $<file:packages/client/tsconfig.json> $<file:packages/client/package.json> && pnpm --filter @plateboard/client exec tsc -p . }
 
 recipe ui: client deps
     ingredients "packages/ui/src/*.ts" "packages/ui/tsconfig.json" "packages/ui/package.json"
     seal web:tools
-    cook "packages/ui/dist/board.js" "packages/ui/dist/board.d.ts" { : $<client> && pnpm --filter @plateboard/ui exec tsc -p . }
+    cook "packages/ui/dist/board.js" "packages/ui/dist/board.d.ts" { : $<client> $<deps> && pnpm --filter @plateboard/ui exec tsc -p . }
 
 recipe menudata: menugen.menu
     cook "app/src/menu.json" { mkdir -p app/src && cp $<menugen.menu> $<out> }
@@ -30,11 +32,11 @@ recipe menudata: menugen.menu
 recipe bundle: ui menudata deps
     ingredients "app/src/main.ts" "app/tsconfig.json" "app/package.json"
     seal web:tools
-    cook "app/dist/bundle.js" { : $<ui> $<menudata> && pnpm --filter @plateboard/app exec esbuild src/main.ts --bundle --format=esm --outfile=dist/bundle.js --log-level=warning }
+    cook "app/dist/bundle.js" { : $<ui> $<menudata> $<deps> && pnpm --filter @plateboard/app exec esbuild src/main.ts --bundle --format=esm --outfile=dist/bundle.js --log-level=warning }
 
 recipe typecheck: deps client ui menudata
     ingredients pnpm:packages
-    cook "build/typecheck/$<in.dir>.stamp" { : $<client> $<ui> $<menudata> && mkdir -p "$(dirname $<out>)" && pnpm --filter "$<in.name>" exec tsc -p . --noEmit && echo ok > $<out> }
+    cook "build/typecheck/$<in.dir>.stamp" { : $<client> $<ui> $<menudata> $<deps> && mkdir -p "$(dirname $<out>)" && pnpm --filter "$<in.name>" exec tsc -p . --noEmit && echo ok > $<out> }
 
 recipe smoke: bundle
     ingredients "app/test/smoke.mjs"
