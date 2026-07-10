@@ -1,0 +1,45 @@
+openapi: "3.0.3"
+info:
+  title: Plateboard Menu API
+  version: "1.0.0"
+paths:
+  /menu:
+    get:
+      operationId: listMenu
+      responses:
+        "200":
+          description: Full menu
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/MenuItem"
+  /menu/{name}:
+    get:
+      operationId: getMenuItem
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: One menu item
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MenuItem"
+components:
+  schemas:
+    MenuItem:
+      type: object
+      required: [name, price]
+      properties:
+        name:
+          type: string
+        price:
+          type: number
+        tags:
+          type: string
