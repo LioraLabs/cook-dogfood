@@ -10,15 +10,15 @@ gets recorded here as a module line item, then written inline anyway.
 | Tag | Count |
 |---|---|
 | [core-bug] | 3 |
-| [core-ergonomics] | 16 |
+| [core-ergonomics] | 17 |
 | [module:pnpm] | 4 |
 | [module:dotnet] | 5 |
 | [module:rust] | 2 |
 | [module:python] | 1 |
 | [module:generic] | 6 |
-| **Total** | **37** |
+| **Total** | **38** |
 
-Of 37 tagged findings, three are [core-bug]s and warrant priority triage against the unlanded milestone. The most severe is a false-cache-HIT / registration-without-execution bug: a bare `cook test` registers the full workspace graph and re-records local-index input fingerprints for units that never ran, so a subsequent `cook typecheck`/`cook why` can report a `HIT` on content the underlying tool never actually saw — genuine cache poisoning, not mere over-invalidation. Closely related is a `test`-step vs `cook`-step dependency-fold inconsistency: `cook`-step units fold an upstream dependency's *output content* (enabling early cutoff), while `test`-step units fold the upstream's *execution*, so test suites systematically over-invalidate relative to their `cook`-step siblings consuming the identical dependency. The third core-bug is cosmetic but real: live build-log output is mislabeled with the previous (already-cached) probe's node name for the full duration of the actual work, and fan-out members' display labels are truncated to the point of being genuinely indistinguishable from one another within a single invocation. On the ergonomics side, the two heavyweights are that a `recipe A: B` header-only dependency is ordering-only and contributes nothing to the cache key unless the body references `$<B>` directly — forcing a `: $<dep> &&` no-op-reference idiom as the only known workaround — and that the built-in `cook menu` subcommand silently shadows any user recipe literally named `menu`, exiting 0 with no build output and no error. Module line items skew toward dotnet (5, mostly toolchain/restore/incrementality gaps a `cook_dotnet` module should own outright) and pnpm (4, centered on the per-package dependency-topology gap where `typecheck`'s fan-out only fingerprints the package *list*, not each member's source tree).
+Of 38 tagged findings, three are [core-bug]s and warrant priority triage against the unlanded milestone. The most severe is the `test`-step vs `cook`-step dependency-fold inconsistency and its false-cache-HIT addendum: `cook`-step units fold an upstream dependency's *output content* (enabling early cutoff) while `test`-step units fold the upstream's *execution* (systematic over-invalidation) — and, worse, a bare `cook test` registers the full workspace graph and re-records local-index input fingerprints for units that never ran, so a subsequent `cook typecheck`/`cook why` can report a `HIT` on content the underlying tool never actually saw: genuine cache poisoning. The second core-bug is that the `local`-disposition cache is single-slot last-build-wins — alternating an input A→B→A always rebuilds on revert, where the default shared-store disposition hits immediately — which erases most of `local`'s caching value for branch-switching workflows. The third is cosmetic but real: live build-log output is mislabeled with the previous (already-cached) probe's node name for the full duration of the actual work. (Relatedly, fan-out members' display labels can render truncated and identical within one invocation — tracked as [core-ergonomics].) On the ergonomics side, the two heavyweights are that a `recipe A: B` header-only dependency is ordering-only and contributes nothing to the cache key unless the body references `$<B>` directly — forcing a `: $<dep> &&` no-op-reference idiom as the only known workaround — and that the built-in `cook menu` subcommand silently shadows any user recipe literally named `menu`, exiting 0 with no build output and no error. Module line items skew toward dotnet (5, mostly toolchain/restore/incrementality gaps a `cook_dotnet` module should own outright) and pnpm (4, centered on the per-package dependency-topology gap where `typecheck`'s fan-out only fingerprints the package *list*, not each member's source tree).
 
 ## Log
 
@@ -40,7 +40,7 @@ Of 37 tagged findings, three are [core-bug]s and warrant priority triage against
 
   Checkpoint-3 mechanism finding: bare `cook test` registers the full workspace recipe graph, and registration-without-execution re-records local-index input fingerprints from the current filesystem for units that never ran — verified via `.cook/cache/typecheck.toml` snapshots, where the recorded input hash advanced from old to new content after `cook test` executed zero `typecheck` units, and a subsequent `cook why typecheck` then reported `HIT (local)` on content the `tsc` invocation never actually saw. Any command that registers-without-executing (not just `cook test`) likely poisons the cache the same way.
 
-### [core-ergonomics] (16)
+### [core-ergonomics] (17)
 
 - [core-ergonomics] Recipe name `menu` collides with the built-in `cook menu` subcommand — `cook menu` silently ran the built-in recipe-lister (`recipe build\n  recipe menu\n  recipe check`, exit 0) instead of building anything; no error, no build/ dir, easy to mistake for a successful no-op run. The CLI does document an escape hatch (`cook +menu` invokes the colliding recipe name) and `--help` mentions it, but the natural recipe name for a `menugen` tool is exactly the word that collides. Worked around by using `cook +menu` throughout; same would apply to any recipe named `test`, `list`, `dag`, `logs`, `serve`, etc.
 
@@ -87,6 +87,8 @@ Of 37 tagged findings, three are [core-bug]s and warrant priority triage against
 - [core-ergonomics] Root aggregation (`import contracts ./contracts` / `import menugen ./tools/menugen` / `import api ./services/api` / `import web ./apps/web`, all tree-relative `./` sigils from the workspace root) worked first try, zero friction: recipe names auto-namespace by import alias (`api.build`, `web.bundle`, `web.typecheck`, `menugen.menu`, `contracts.gen`), header deps on imported recipes ordered the whole four-stack DAG correctly, and both probe-consumption modes in the same recipe body — `$<stack:versions.FIELD>` shell-sigil injection in the first `cook` step and `cook.probes.get("stack:versions")` inside the second `cook ... >{ lua }` step — resolved correctly with no adaptation needed. `fs.write(output, ...)` in the Lua step wrote `build/manifest.lua.txt` correctly (auto-creating `build/` per §{lua.fs-write}, so the `mkdir -p build` in the sibling shell step was redundant for the Lua step specifically, though still required for the shell step's own `$<out>` redirect).
 
 - [core-ergonomics] Latent probe-scheduling gap, not triggered here but worth flagging: per §{cat.probes.exec}/§22.5's demand-driven-scheduling rule, a probe unit only executes if some *scheduled non-probe unit lists the probe's key in its `probes` field* — and per `cook-luagen/src/cook_step.rs`, a declarative `cook "path" >{ lua }` step (`Body::LuaBlock`) never gets an auto-populated `probes` field the way a shell `Body::ShellBlock` step does via `$<key.field>` sigil-scanning (`expand_command_template`); the generated `cook.add_unit` call for a Lua-body step carries no `probes = {...}` entry at all, regardless of whether the Lua source calls `cook.probes.get(...)`. In this Cookfile the second (Lua) `cook` step reading `stack:versions` shares a recipe with the first (shell) step, whose `$<stack:versions.dotnet>` etc. placeholders DO populate that step's `probes` field and thus demand-schedule the probe — so the Lua step's `cook.probes.get` call always found the value populated, ordering worked, no failure observed across the cold build, the sanity re-run, and the no-op rebuild. But a Cookfile with a probe consumed *only* from a `>{ lua }` step's `cook.probes.get(...)` call — no sibling shell step referencing the same probe by sigil — would have no `probes`/`requires` edge demanding that probe at all, and per the demand-driven-scheduling rule the probe unit "MUST NOT execute" in that case; `cook.probes.get` would then read `nil` from an unpopulated per-run store rather than erroring loudly. Recommend either (a) extending the same `$<key.field>`-sigil pre-scan cook already does for shell bodies to Lua-body text so `cook.probes.get("ns:key")` calls auto-populate `probes`, or (b) a register-time diagnostic when a `>{ lua }` body's literal `cook.probes.get("...")` argument names a probe absent from that unit's `probes` list.
+
+- [core-ergonomics] Recipe-level `seal` appears not to fold into TEST-step unit keys: adding `seal web:tools` to the `smoke` recipe (test-only body) produced no key change — the very next `cook test` reported the suite `(cached)` with no re-run, whereas the same edit on a cook-step recipe re-keys its units. Consistent with the Standard's letter (§8.4.3 rule 1 scopes the baseline to "every `cook` unit in the recipe"), so possibly by design — but a `seal` line in a test-only recipe is then a silent no-op the author has no feedback about; a register-time note/diagnostic ("seal has no cook units to apply to") would prevent authors believing their test suite is toolchain-keyed when it isn't. (Test suites still fold their ingredients and dep executions; only the probe-seal path is inert.)
 
 ### [module:pnpm] (4)
 
@@ -259,6 +261,9 @@ test result: ok. 2 passed; finished in 2.0s
 # re-ran solely because its upstream dependency (menugen.menu) re-ran, even though that
 # dependency's output content did not change. The cross-recipe dependency edge appears to
 # key on "did the upstream unit execute", not on the upstream unit's output content hash.
+# [Superseded/refined later: this generalization holds for TEST-step units only; cook-step
+#  units fold upstream output CONTENT and do get early cutoff — see the test-vs-cook
+#  dependency-fold [core-bug] entry in the Log, which reconciles this observation.]
 
 $ cook test        # re-run, no further edits
 running tests
@@ -465,13 +470,13 @@ $ $COOK build
   web.client/menuClient.js                           cached
   web.ui/board.js                                cached
   web.bundle/bundle.js                               cached
-  web.typecheck/client.stamp (x3, mislabeled -- see label-truncation core-bug above)  cached
+  web.typecheck/client.stamp (x3, mislabeled -- see label-truncation [core-ergonomics] entry above)  cached
   build/$probe:stack:versions                   cached
   build/manifest.txt   (x2, second is actually manifest.lua.txt mislabeled)  cached
 cook done in 0.17s (24 nodes, 3 cached recipes, 11 done)
 ```
 
-Every non-probe unit cached; wall time dropped 5.13s -> 0.17s. `tools {}`-kind probes (`$probe:*:tools`) show `0.00s` rather than `cached` on both runs, including this no-op one -- expected per §{cat.probes} `tools {}` semantics (CS: "the hash is both the probe value and its re-run trigger" -- the probe body always re-executes to recompute the binary hash; only *downstream* units get to be `cached` when the hash is unchanged). Not a new finding. The two live-log mislabelings (`web.typecheck`'s three fan-out members all printing the same truncated stamp name; the root `build` recipe's second `cook` step printing `manifest.txt` instead of `manifest.lua.txt`) are the same cosmetic label-truncation `[core-bug]` already logged for Task 9 -- both `build/manifest.txt` and `build/manifest.lua.txt` were independently confirmed correct and unchanged on disk (`ls -la` mtimes identical pre/post this no-op run).
+Every non-probe unit cached; wall time dropped 5.13s -> 0.17s. `tools {}`-kind probes (`$probe:*:tools`) show `0.00s` rather than `cached` on both runs, including this no-op one -- expected per §{cat.probes} `tools {}` semantics (CS: "the hash is both the probe value and its re-run trigger" -- the probe body always re-executes to recompute the binary hash; only *downstream* units get to be `cached` when the hash is unchanged). Not a new finding. The two live-log mislabelings (`web.typecheck`'s three fan-out members all printing the same truncated stamp name; the root `build` recipe's second `cook` step printing `manifest.txt` instead of `manifest.lua.txt`) are the same cosmetic label-truncation `[core-ergonomics]` finding already logged for Task 9 -- both `build/manifest.txt` and `build/manifest.lua.txt` were independently confirmed correct and unchanged on disk (`ls -la` mtimes identical pre/post this no-op run).
 
 #### Bar 4 pre-check — root `cook test`
 

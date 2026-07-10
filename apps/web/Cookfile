@@ -41,4 +41,5 @@ recipe typecheck: deps client ui menudata
 
 recipe smoke: bundle
     ingredients "app/test/smoke.mjs"
+    seal web:tools
     test { : $<bundle> && node app/test/smoke.mjs }
