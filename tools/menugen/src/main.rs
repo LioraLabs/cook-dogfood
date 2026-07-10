@@ -42,7 +42,7 @@ fn check(items: &[Item]) -> Result<(), String> {
 
 fn to_json(items: &[Item]) -> String {
     let rows: Vec<String> = items.iter().map(|i| format!(
-        "  {{\"name\": \"{}\", \"price\": {:.2}, \"tags\": \"{}\"}}", i.name, i.price, i.tags
+        "  {{\"name\": \"{}\", \"price\": {:.2}, \"currency\": \"USD\", \"tags\": \"{}\"}}", i.name, i.price, i.tags
     )).collect();
     format!("[\n{}\n]\n", rows.join(",\n"))
 }

@@ -43,3 +43,5 @@ components:
           type: number
         tags:
           type: string
+        description:
+          type: string

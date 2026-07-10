@@ -67,6 +67,7 @@ gets recorded here as a module line item, then written inline anyway.
 - [module:generic] Stamp-output dep edges are unfoldable when the stamp content is constant: `apps/web/Cookfile`'s `deps` recipe originally wrote `echo ok > $<out>` to `build/pnpm-install.stamp` — byte-identical on every successful `pnpm install`, regardless of what actually got installed. Even with every consumer folding `$<deps>` via the `: $<dep> &&` no-op idiom (see the entry above), a toolchain bump reachable only through `pnpm-lock.yaml` (e.g. a `typescript`/`esbuild` version bump) re-ran the `deps` unit (its own `ingredients` include the lockfile) but produced the same `ok` bytes, so early cutoff kept every downstream consumer (`client`, `ui`, `bundle`, `typecheck`) cached against a compiler/bundler version they never actually ran against — a stale-but-green dist built by an old compiler with a fresh-looking cache. The fix applied here: make the stamp's *content* a toolchain fingerprint (`sha256sum pnpm-lock.yaml; pnpm exec tsc --version; pnpm exec esbuild --version`) instead of a constant, so a real toolchain change produces different stamp bytes and correctly defeats early cutoff downstream. Any module shipping an install-stamp target-maker (`cook_pnpm`, `cook_dotnet`'s restore stamp, etc.) must emit meaningful, toolchain-sensitive stamp content, not a constant `echo ok` — a constant stamp makes its own dependency edge structurally unfoldable no matter how carefully consumers reference it.
 
 - [core-ergonomics] Recipe-level `ingredients` in a multi-`cook`-step recipe binds only to the step that consumes it as its iteration source (here, the first `cook` step), not to every `cook` step in the recipe body — confirmed via `cook why client` after adding `ingredients "packages/client/tsconfig.json" "packages/client/package.json"` to `client` (a two-step recipe: a `cp` step then a `tsc` step): the first step's declared `inputs:` correctly gained both config files, but the second (`tsc`) step's `inputs:` still listed only `build/pnpm-install.stamp` and the first step's output file — editing `tsconfig.json` re-ran the `cp` step (harmlessly, its body ignores the new inputs) but left the `tsc` step `cached`, because the `cp` step's output bytes were unchanged (early cutoff). The Standard's at-most-one-`ingredients`-per-recipe-body rule (§6, CS-normative) makes a second, step-scoped `ingredients` declaration impossible within one recipe — the actual fix (applied here) is `$<file:PATH>` (CS-0101, §{phl.cook-step}), a placeholder that folds an arbitrary file's content into *that specific step's* declared inputs regardless of `ingredients` scope: `: $<deps> $<file:packages/client/tsconfig.json> $<file:packages/client/package.json> && ...` in the `tsc` step's own body closed the gap, verified by `cook why` showing both files in that unit's `inputs:` and by a live edit-then-rebuild correctly re-running just that step. Worth noting for anyone extrapolating the `ingredients`+`seal` idiom to a multi-step recipe: it silently covers only one step, and `$<file:PATH>` (not `ingredients`) is the per-step escape hatch.
+- [core-ergonomics] `cook why <recipe>` reports each unit's cache status by re-deriving that unit's own key from its own declared inputs against the *current* on-disk/index state — it does not cascade-predict what a subsequent `cook build` would do to units further downstream. Observed live in Task 11: after editing `tools/menugen/src/main.rs` (the direct `ingredients` of `menugen.build`), `$COOK why build` from the workspace root correctly flagged `build :: build/menugen@... [MISS (shared)]` (its `src/main.rs` input hash differs from any known key, with `shared-miss diff: no producer manifest published for this key`), but every downstream unit in the same report — `menu :: build/menu.json`, `menudata :: app/src/menu.json`, `bundle :: app/dist/bundle.js`, `build :: build/manifest.txt` — still reported `[HIT (local)]`, because their listed `inputs:` still show the *old*, still-on-disk `build/menugen` content hash (e.g. `build/menugen  3707fb34781d0e70`), not the hash that a rebuilt `menugen` binary would produce. This is internally consistent (why is describing the graph as it stands, not simulating a future run) but easy to misread as "only `menugen.build` will re-run" when actually every downstream consumer that references `$<menugen.build>`/`$<menugen.menu>` content will also miss once the direct MISS is resolved and its output content changes. Anyone using `cook why` to scope the blast radius of a pending edit before running `cook build` should read it as "confirmed direct cause only," not "full downstream impact," and re-run `cook why` on the specific downstream recipe of interest *after* the rebuild to confirm propagation, not before.
 
 ## Verification evidence
 
@@ -425,3 +426,139 @@ test result: ok. 3 passed; finished in 2.3s
 ```
 
 Root `cook test` (bare, no scope arg) DOES aggregate every test recipe reachable transitively through all four imports in one invocation: `menugen.check` (rust, via `web`'s `menudata: menugen.menu` edge), `web.smoke` (the pnpm/esbuild bundle smoke test), and `api.tests` (xunit). This matches the workspace-wide-by-default behavior already documented for sub-tree `cook test` invocations (Task 7/9 findings) -- scoping up to the workspace root doesn't change the aggregation rule, it was already whole-workspace regardless of which Cookfile issued the bare command. No `[core-ergonomics]` filed since this is the expected/desired behavior for a root aggregation point. Per the known bare-`cook test` local-index poisoning quirk, no further cache conclusions are drawn from any run after this one -- Bars 1 and 2 above were both captured before this `cook test` invocation.
+
+## Verification evidence — Task 11
+
+### Task 11 — edge proofs (Bars 3+4)
+
+Baseline: repo was already fully settled from Task 10 (`git status` clean at task start). `$COOK build` twice in a row from root both reported `cook done in 0.17s (24 nodes, 3 cached recipes, 11 done)` — fully cached, confirming the settled starting point before any edit.
+
+#### Edge 1 — contract edit (`contracts/menu-api.yaml`)
+
+Edit: added an optional `description: string` property to the `MenuItem` schema.
+
+Observed invalidation set (`$COOK build`, full transcript in `/tmp/edge-contract.txt`):
+
+| unit | result |
+|---|---|
+| `web.contracts.gen` (menuClient.ts) | **re-ran** |
+| `web.client` (both cook steps: cp + tsc) | **re-ran** |
+| `web.ui` (tsc step) | **re-ran** (recompiled — client dist content changed) |
+| `web.bundle` | **cached** (1/2 cached; only the `tools{}` probe re-executes, bundle.js itself hit) |
+| `web.typecheck` (3 fan-out members + probe) | **re-ran**, all 4/4 |
+| `api.build` | cached |
+| `web.menugen.*`, `web.menudata`, `web.deps` | cached (unaffected) |
+| `build` (root manifest) | cached (3/3 — both `manifest.txt` and `manifest.lua.txt` unchanged) |
+
+`cook done in 1.61s (24 nodes, 3 cached recipes, 11 done)`.
+
+Matches the expected model exactly, **including the early cutoff**: `packages/client/dist/menuClient.d.ts` gained `description?: string;` (verified: `grep -n description apps/web/packages/client/dist/menuClient.d.ts` → `description?: string;`), which forced `ui`'s tsc step to re-run (it folds client dist content) — but `board.ts` never references `description`, so `packages/ui/dist/board.js`/`.d.ts` came out byte-identical, and `web.bundle` correctly stayed cached off that unchanged content (`grep -c description apps/web/app/dist/bundle.js` → `0`). Root `build` also stayed cached since neither `web.bundle` nor `menugen.menu` content changed. Re-ran `$COOK build` again after: fully cached, settled. Edit kept.
+
+#### Edge 2 — menugen source edit (`tools/menugen/src/main.rs`)
+
+Edit: `to_json` now also emits a `"currency": "USD"` field per menu item.
+
+`cook why` captured **before** building (read-only; full transcripts `/tmp/why-root.txt`, `/tmp/why-bundle.txt`) — see the condensed excerpt below and the new `[core-ergonomics]` Log entry above: the direct producer (`menugen.build`) correctly reported `[MISS (shared)]`, but every downstream unit in the same report (`menu`, `menudata`, `bundle`, root `build`) still reported `[HIT (local)]`, because `why` evaluates each unit against inputs *currently on disk*, not a simulated post-rebuild state.
+
+Observed invalidation set (`$COOK build`, full transcript `/tmp/edge-menugen.txt`):
+
+| unit | result |
+|---|---|
+| `web.menugen.build` (cargo) | **re-ran** |
+| `web.menugen.menu` (menu.json) | **re-ran** (now has `currency`) |
+| `web.menudata` (copy) | **re-ran** |
+| `web.bundle` | **re-ran** (2/2 — content changed via menudata) |
+| `web.typecheck` (3 members) | **re-ran**, 4/4 (folds menudata content) |
+| `build/manifest.txt` (shell step) | **re-ran** (folds bundle + menu content) |
+| `build/manifest.lua.txt` (lua step) | cached (only folds the `stack:versions` probe, independent of manifest.txt/menu content) |
+| `web.contracts.gen`, `web.client`, `web.ui`, `web.deps`, `api.build` | cached (unaffected) |
+
+`cook done in 0.92s (24 nodes, 0 cached recipes, 11 done)`. Verified `tools/menugen/build/menu.json` contains `"currency": "USD"` per item, and `grep -c currency apps/web/app/dist/bundle.js` → `3`.
+
+Then `$COOK test` (full transcript `/tmp/edge-menugen-test.txt`):
+
+```
+running tests
+test web.menugen.check@15 [menu.toml] ... ok
+test web.smoke@44 ... ok
+test api.tests@14 ... ok
+
+test result: ok. 3 passed; finished in 2.1s
+```
+
+None of the three carry a `(cached)` tag — **all three re-ran**, matching the expected model: `menugen.check` folds `$<menugen.build>` execution (menugen.build re-ran), `api.tests` folds `$<menugen.menu>` execution (menu re-ran), `web.smoke` folds `$<bundle>` execution (bundle re-ran). All passed — confirms the dotnet `MenuItem` deserializer (`PropertyNameCaseInsensitive`) silently ignores the unknown `currency` field rather than failing. Re-ran `$COOK build`: fully cached, settled. Edit kept.
+
+#### Edge 3 — ui package edit (`apps/web/packages/ui/src/board.ts`)
+
+Edit: header string `"== PLATEBOARD =="` → `"== PLATEBOARD v2 =="` (a used symbol, survives esbuild tree-shaking).
+
+Observed invalidation set (`$COOK build`, full transcript `/tmp/edge-ui.txt`):
+
+| unit | result |
+|---|---|
+| `web.ui` | **re-ran** (2/2) |
+| `web.bundle` | **re-ran** (2/2) — verified `grep -c "PLATEBOARD v2" apps/web/app/dist/bundle.js` = `1` |
+| `web.typecheck` (3 members) | **re-ran**, 4/4 |
+| `build/manifest.txt` | **re-ran** (folds bundle content) |
+| `build/manifest.lua.txt` | cached |
+| `web.menugen.*`, `web.contracts.*`, `api.*`, `web.client`, `web.deps` | cached |
+
+`cook done in 1.16s (24 nodes, 2 cached recipes, 11 done)`. Matches the expected model exactly.
+
+Then `$COOK test` (full transcript `/tmp/edge-ui-test.txt`):
+
+```
+running tests
+test menugen.check@15 [menu.toml] ... ok (cached)
+test api.tests@14 ... ok (cached)
+test web.smoke@44 ... ok
+
+test result: ok. 3 passed (2 cached); finished in 0.2s
+```
+
+`web.smoke` re-ran (no `(cached)` tag, bundle re-executed); `api.tests` and `menugen.check` stayed cached (their deps — `menugen.menu`, `menugen.build` — did not re-execute for this edit). Exactly the expected model. Re-ran `$COOK build`: fully cached, settled. Edit kept.
+
+### Bar 4 — per-suite test caching
+
+From the fully settled state (all three edits kept, all prior builds green), `$COOK test` again:
+
+```
+running tests
+test menugen.check@15 [menu.toml] ... ok (cached)
+test api.tests@14 ... ok (cached)
+test web.smoke@44 ... ok (cached)
+
+test result: ok. 3 passed (3 cached); finished in 0.2s
+```
+
+All three suites (rust/menugen, dotnet/xunit, node/esbuild-smoke) report `(cached)` — one polyglot `cook test` invocation, three independently-tracked per-suite cache hits, none re-executed. Combined with the exact re-run/cached splits observed in Edges 1-3 above (each edit re-ran precisely the suites whose upstream execution-folded dependency actually re-executed, and left the rest cached), this is the Bar 4 evidence: per-suite caching is real and precise at unit granularity, not an all-or-nothing "did anything change" gate.
+
+### `cook why` key-attribution excerpt
+
+Condensed from `/tmp/why-root.txt` (captured before the menugen source edit was built), showing the direct MISS at the true edit site and a downstream unit's stale-but-consistent HIT:
+
+```
+build :: build/menugen@2d06800538d394c2 [MISS (shared)]  key 39060791c5abb62e3531f16a6d9dc4199634cdeb89ecf5105f14db60b88cd122
+  command_hash      1aeee7814cf4845c
+  env_contribution  2d06800538d394c2
+  seal_contribution eb17c9009cb2f65b
+  inputs:
+    Cargo.toml  b822982cadd30eee
+    src/main.rs  62bc77a1eaeaac4c
+  outputs:
+    build/menugen
+  sealed probes:
+    rust:tools = { "cargo": {"path": "/usr/bin/cargo", ...}, "rustc": {"path": "/usr/bin/rustc", ...} }
+  shared-miss diff: no producer manifest published for this key
+
+menu :: build/menu.json@2d06800538d394c2 [HIT (local)]  key 9b88d2a1fdbce829abc1517e9ba9863837931221c61526d29b2e452ef84f8134
+  command_hash      41d0d6c7cf5fc487
+  seal_contribution 0000000000000000
+  inputs:
+    build/menugen  3707fb34781d0e70   # <- still the OLD menugen hash; menu itself hasn't re-derived yet
+    menu.toml  a16173fa3b4c209a
+  outputs:
+    build/menu.json
+```
+
+`src/main.rs`'s input hash (`62bc77a1eaeaac4c`) differs from any recorded key for the `menugen.build` unit, producing a direct `MISS (shared)` with `no producer manifest published for this key`. `menu`, one edge downstream, still reports `HIT (local)` because its own `inputs:` list still shows `build/menugen`'s *current on-disk* content hash (`3707fb34781d0e70`) — `why` does not simulate what `menugen`'s rebuilt output hash will be, only what the graph looks like right now. See the new `[core-ergonomics]` Log entry above for the full analysis and the resulting guidance (`cook why` gives confirmed direct cause, not full downstream blast radius).
