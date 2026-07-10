@@ -1,0 +1,2 @@
+# Plateboard — core-only dogfood. Deliberately NO module dependencies.
+[modules]

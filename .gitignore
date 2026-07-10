@@ -1,0 +1,9 @@
+.cook/
+node_modules/
+dist/
+build/
+target/
+bin/
+obj/
+apps/web/packages/client/src/menuClient.ts
+apps/web/app/src/menu.json
