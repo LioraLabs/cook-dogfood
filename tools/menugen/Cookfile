@@ -1,0 +1,15 @@
+probe rust:tools
+    tools { cargo, rustc }
+
+recipe build
+    ingredients "Cargo.toml" "src/*.rs"
+    seal rust:tools
+    cook "build/menugen" { cargo build --quiet && mkdir -p build && cp target/debug/menugen $<out> } nondet
+
+recipe menu: build
+    ingredients "menu.toml"
+    cook "build/menu.json" { ./$<build> $<in> $<out> }
+
+recipe check: build
+    ingredients "menu.toml"
+    test { ./$<build> --check $<in> }
