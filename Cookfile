@@ -1,0 +1,34 @@
+import contracts ./contracts
+import menugen ./tools/menugen
+import api ./services/api
+import web ./apps/web
+
+probe stack:versions
+    json {
+        printf '{"dotnet":"%s","node":"%s","pnpm":"%s","cargo":"%s","python":"%s"}' \
+            "$(dotnet --version)" "$(node --version)" "$(pnpm --version)" \
+            "$(cargo --version | cut -d' ' -f2)" "$(python3 --version | cut -d' ' -f2)"
+    }
+
+recipe build: api.build web.bundle web.typecheck menugen.menu contracts.gen
+    cook "build/manifest.txt" {
+        mkdir -p build
+        {
+            echo "Plateboard — polyglot build unified by cook"
+            echo "dotnet:  $<stack:versions.dotnet>"
+            echo "node:    $<stack:versions.node>"
+            echo "pnpm:    $<stack:versions.pnpm>"
+            echo "cargo:   $<stack:versions.cargo>"
+            echo "python:  $<stack:versions.python>"
+            echo "menu:    $<menugen.menu>"
+            echo "bundle:  $<web.bundle>"
+        } > $<out>
+    }
+    cook "build/manifest.lua.txt" >{
+        local v = cook.probes.get("stack:versions")
+        local lines = { "stacks (via cook.probes.get):" }
+        for _, k in ipairs({ "dotnet", "node", "pnpm", "cargo", "python" }) do
+            table.insert(lines, k .. "=" .. tostring(v[k]))
+        end
+        fs.write(output, table.concat(lines, "\n") .. "\n")
+    }

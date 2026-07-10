@@ -337,3 +337,91 @@ each member's source tree, so this Cookfile's dependency shape is deliberately c
 false-cached on real per-package source edits.
 
 - [core-ergonomics] `client`'s `cp $<contracts.gen> $<out>` step (the first of its two `cook` steps) re-runs on an unrelated `tsconfig.json` edit because recipe-level `ingredients` binds only to the recipe's first `cook` step (see the multi-step `ingredients`-scoping finding above) — a `tsconfig.json` change re-invokes the harmless `cp`, not just the `tsc` step that actually cares. Harmless (the `cp` step's output content is unaffected, so early cutoff still spares the downstream `tsc` step), but worth flagging as one more surface of the same root cause.
+
+### Task 10 — root Cookfile
+
+- [core-ergonomics] Root aggregation (`import contracts ./contracts` / `import menugen ./tools/menugen` / `import api ./services/api` / `import web ./apps/web`, all tree-relative `./` sigils from the workspace root) worked first try, zero friction: recipe names auto-namespace by import alias (`api.build`, `web.bundle`, `web.typecheck`, `menugen.menu`, `contracts.gen`), header deps on imported recipes ordered the whole four-stack DAG correctly, and both probe-consumption modes in the same recipe body — `$<stack:versions.FIELD>` shell-sigil injection in the first `cook` step and `cook.probes.get("stack:versions")` inside the second `cook ... >{ lua }` step — resolved correctly with no adaptation needed. `fs.write(output, ...)` in the Lua step wrote `build/manifest.lua.txt` correctly (auto-creating `build/` per §{lua.fs-write}, so the `mkdir -p build` in the sibling shell step was redundant for the Lua step specifically, though still required for the shell step's own `$<out>` redirect).
+- [core-ergonomics] Latent probe-scheduling gap, not triggered here but worth flagging: per §{cat.probes.exec}/§22.5's demand-driven-scheduling rule, a probe unit only executes if some *scheduled non-probe unit lists the probe's key in its `probes` field* — and per `cook-luagen/src/cook_step.rs`, a declarative `cook "path" >{ lua }` step (`Body::LuaBlock`) never gets an auto-populated `probes` field the way a shell `Body::ShellBlock` step does via `$<key.field>` sigil-scanning (`expand_command_template`); the generated `cook.add_unit` call for a Lua-body step carries no `probes = {...}` entry at all, regardless of whether the Lua source calls `cook.probes.get(...)`. In this Cookfile the second (Lua) `cook` step reading `stack:versions` shares a recipe with the first (shell) step, whose `$<stack:versions.dotnet>` etc. placeholders DO populate that step's `probes` field and thus demand-schedule the probe — so the Lua step's `cook.probes.get` call always found the value populated, ordering worked, no failure observed across the cold build, the sanity re-run, and the no-op rebuild. But a Cookfile with a probe consumed *only* from a `>{ lua }` step's `cook.probes.get(...)` call — no sibling shell step referencing the same probe by sigil — would have no `probes`/`requires` edge demanding that probe at all, and per the demand-driven-scheduling rule the probe unit "MUST NOT execute" in that case; `cook.probes.get` would then read `nil` from an unpopulated per-run store rather than erroring loudly. Recommend either (a) extending the same `$<key.field>`-sigil pre-scan cook already does for shell bodies to Lua-body text so `cook.probes.get("ns:key")` calls auto-populate `probes`, or (b) a register-time diagnostic when a `>{ lua }` body's literal `cook.probes.get("...")` argument names a probe absent from that unit's `probes` list.
+
+## Verification evidence — Task 10
+
+### Bar 1 — cold build
+
+```
+$ git add Cookfile   # protects the new untracked root Cookfile from the git-clean step below
+$ rm -rf ~/.cache/cook
+$ git clean -xfdn   # eyeballed: only gitignored build dirs (.cook, node_modules, bin/obj,
+                     # target, dist) -- no tracked file listed, new Cookfile excluded (staged)
+$ git clean -xfd
+Removing .cook/  apps/web/.cook/  apps/web/app/dist/  apps/web/app/node_modules/
+Removing apps/web/app/src/menu.json  apps/web/build/  apps/web/node_modules/
+Removing apps/web/packages/client/dist/  apps/web/packages/client/src/
+Removing apps/web/packages/ui/dist/  apps/web/packages/ui/node_modules/  build/
+Removing contracts/.cook/  contracts/build/  services/api/.cook/
+Removing services/api/Api.Tests/bin/  services/api/Api.Tests/obj/
+Removing services/api/Api/bin/  services/api/Api/obj/  services/api/build/
+Removing tools/menugen/.cook/  tools/menugen/build/  tools/menugen/target/
+
+$ time COOK=/home/alex/dev/cook/cli/target/debug/cook $COOK build
+  api.build                queued  (2 nodes)
+  web.contracts.gen        queued  (2 nodes)
+  web.deps                 queued  (2 nodes)
+  web.menugen.build        queued  (2 nodes)
+  web.client               queued  (3 nodes)
+  ... (11 recipes, 24 nodes total queued)
+  web.contracts.gen        done     (2/2)                    0.04s
+  web.menugen.build        done     (2/2)                    0.35s
+  web.menugen.menu         done     (1/1)                    0.04s
+  web.menudata             done     (1/1)                    0.00s
+  web.deps                 done     (2/2)                    0.77s     # fresh pnpm install
+  web.client               done     (3/3)                    0.51s
+  web.ui                   done     (2/2)                    0.55s
+  web.bundle                done     (2/2)                    0.28s
+  web.typecheck             done     (4/4)                    0.56s
+  [api.build/probe:dotnet:tools] Build succeeded. 0 Warning(s), 0 Error(s), Time Elapsed 00:00:04.64
+  api.build                done     (2/2)                    4.81s     # fresh dotnet build (obj/ absent)
+  build/$probe:stack:versions                   0.00s
+  build/manifest.txt                            0.00s
+  build/manifest.lua.txt                        0.00s
+  build                    done     (3/3)                    0.28s
+cook done in 5.10s (24 nodes, 0 cached recipes, 11 done)
+$COOK build  8.57s user 0.98s system 185% cpu 5.134 total
+```
+
+Well under the ~2 min budget (5.13s wall / ~9.5s CPU across 32 cores). `node_modules` (2 top-level + app), `Api/bin`+`Api/obj`, and `target/debug/menugen` all confirmed freshly regenerated (menugen has zero external crates, so its "cold" cargo compile is legitimately sub-second — not a caching artifact, verified via `Cargo.toml`). `build/manifest.txt` content spot-checked correct (`dotnet 10.0.109`, `node v22.23.1`, `pnpm 10.33.0`, `cargo 1.93.1`, `python 3.14.6`, plus the resolved `menugen.menu`/`web.bundle` cross-Cookfile placeholder paths).
+
+### Bar 2 — no-op rebuild
+
+```
+$ $COOK build
+  web.contracts.gen/menuClient.ts                           cached
+  api.build/api-build.stamp                         cached
+  web.menugen.build/menugen                                 cached
+  web.menugen.menu/menu.json                               cached
+  web.menudata/menu.json                               cached
+  web.deps/pnpm-install.stamp                      cached
+  web.client/menuClient.ts                           cached
+  web.client/menuClient.js                           cached
+  web.ui/board.js                                cached
+  web.bundle/bundle.js                               cached
+  web.typecheck/client.stamp (x3, mislabeled -- see label-truncation core-bug above)  cached
+  build/$probe:stack:versions                   cached
+  build/manifest.txt   (x2, second is actually manifest.lua.txt mislabeled)  cached
+cook done in 0.17s (24 nodes, 3 cached recipes, 11 done)
+```
+
+Every non-probe unit cached; wall time dropped 5.13s -> 0.17s. `tools {}`-kind probes (`$probe:*:tools`) show `0.00s` rather than `cached` on both runs, including this no-op one -- expected per §{cat.probes} `tools {}` semantics (CS: "the hash is both the probe value and its re-run trigger" -- the probe body always re-executes to recompute the binary hash; only *downstream* units get to be `cached` when the hash is unchanged). Not a new finding. The two live-log mislabelings (`web.typecheck`'s three fan-out members all printing the same truncated stamp name; the root `build` recipe's second `cook` step printing `manifest.txt` instead of `manifest.lua.txt`) are the same cosmetic label-truncation `[core-bug]` already logged for Task 9 -- both `build/manifest.txt` and `build/manifest.lua.txt` were independently confirmed correct and unchanged on disk (`ls -la` mtimes identical pre/post this no-op run).
+
+### Bar 4 pre-check — root `cook test`
+
+```
+$ $COOK test
+running tests
+test web.menugen.check@15 [menu.toml] ... ok
+test web.smoke@44 ... ok
+test api.tests@14 ... ok
+
+test result: ok. 3 passed; finished in 2.3s
+```
+
+Root `cook test` (bare, no scope arg) DOES aggregate every test recipe reachable transitively through all four imports in one invocation: `menugen.check` (rust, via `web`'s `menudata: menugen.menu` edge), `web.smoke` (the pnpm/esbuild bundle smoke test), and `api.tests` (xunit). This matches the workspace-wide-by-default behavior already documented for sub-tree `cook test` invocations (Task 7/9 findings) -- scoping up to the workspace root doesn't change the aggregation rule, it was already whole-workspace regardless of which Cookfile issued the bare command. No `[core-ergonomics]` filed since this is the expected/desired behavior for a root aggregation point. Per the known bare-`cook test` local-index poisoning quirk, no further cache conclusions are drawn from any run after this one -- Bars 1 and 2 above were both captured before this `cook test` invocation.
