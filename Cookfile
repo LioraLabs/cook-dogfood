@@ -10,7 +10,13 @@ probe stack:versions
             "$(cargo --version | cut -d' ' -f2)" "$(python3 --version | cut -d' ' -f2)"
     }
 
-recipe build: api.build web.bundle web.typecheck menugen.menu contracts.gen
+# build is the "build everything" aggregate. menugen.menu and web.bundle are
+# consumed via $<...> body refs below (data deps — no header entry needed).
+# api.build / web.typecheck / contracts.gen produce nothing the manifest reads:
+# they are deliberate order-only fences kept so `cook build` builds the whole
+# stack. (contracts.gen is also reachable transitively via web.bundle's body
+# chain, but is listed here so the aggregate's intent survives graph changes.)
+recipe build: api.build web.typecheck contracts.gen
     cook "build/manifest.txt" {
         mkdir -p build
         {

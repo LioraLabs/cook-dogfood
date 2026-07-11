@@ -8,7 +8,12 @@ recipe build
     seal dotnet:tools
     cook "build/api-build.stamp" { dotnet build Api/Api.csproj --nologo -v q && mkdir -p build && echo ok > $<out> } local
 
-recipe tests: build menugen.menu
+# `: build` is a deliberate order-only fence, NOT a data dep: `dotnet test`
+# re-compiles the Api project itself (tests never reads build's stamp), but
+# running it concurrently with `build`'s dotnet invocation would contend on
+# the shared Api obj/ tree, and the fence surfaces compile errors under
+# `build` first. menugen.menu is consumed via $<menugen.menu> in the body.
+recipe tests: build
     ingredients "Api.Tests/*.cs" "Api.Tests/Api.Tests.csproj" "Api/*.cs"
     seal dotnet:tools
     test { MENU_JSON="$(realpath $<menugen.menu>)" dotnet test Api.Tests/Api.Tests.csproj --nologo -v q }
