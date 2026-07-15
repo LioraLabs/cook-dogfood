@@ -41,5 +41,4 @@ recipe typecheck
 
 recipe smoke
     ingredients "app/test/smoke.mjs"
-    seal web:tools
     test { : $<bundle> && node app/test/smoke.mjs }

@@ -15,5 +15,4 @@ recipe build
 # `build` first. menugen.menu is consumed via $<menugen.menu> in the body.
 recipe tests: build
     ingredients "Api.Tests/*.cs" "Api.Tests/Api.Tests.csproj" "Api/*.cs"
-    seal dotnet:tools
     test { MENU_JSON="$(realpath $<menugen.menu>)" dotnet test Api.Tests/Api.Tests.csproj --nologo -v q }
