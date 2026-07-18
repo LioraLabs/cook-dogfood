@@ -34,14 +34,13 @@ recipe bundle
     seal web:tools
     cook "app/dist/bundle.js" { : $<ui> $<client> $<menudata> $<deps> && pnpm --filter @plateboard/app exec esbuild src/main.ts --bundle --format=esm --outfile=dist/bundle.js --log-level=warning }
 
-# Content digest of every TypeScript source and tsconfig the typecheck units
-# read. `ingredients pnpm:packages` occupies typecheck's iteration slot, so
-# these can't be file ingredients on the recipe; sealing this probe folds
-# their digest into each stamp's key instead. The glob list is mirrored in
-# the body (a probe body has no $<in>) — keep the two in sync.
+# Every TypeScript source and tsconfig the typecheck units read, as a
+# sealable determinant. `ingredients pnpm:packages` occupies typecheck's
+# iteration slot, so these can't be file ingredients on the recipe; sealing
+# this probe folds each file's identity into every stamp's key instead, and
+# `cook why` names the exact file behind any miss.
 probe ts:sources
-    ingredients "packages/*/src/*.ts" "packages/*/tsconfig.json" "app/src/*.ts" "app/tsconfig.json"
-    { cat packages/*/src/*.ts packages/*/tsconfig.json app/src/*.ts app/tsconfig.json | sha256sum | cut -d' ' -f1 }
+    files { "packages/*/src/*.ts" "packages/*/tsconfig.json" "app/src/*.ts" "app/tsconfig.json" }
 
 recipe typecheck
     ingredients pnpm:packages
