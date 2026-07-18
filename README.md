@@ -18,6 +18,12 @@ There is no build script gluing these together. Each subproject has its own
 builds the whole stack and rebuilds only the parts whose inputs actually
 changed — across every language.
 
+Plateboard is deliberately small — the whole stack builds cold in a few
+seconds — so you can clone it, break things, and watch the graph react. It is
+the worked example, not the scale proof: for cook driving a codebase with real
+compile times, see [cook-dhewm3](https://github.com/LioraLabs/cook-dhewm3),
+the Doom 3 source port built as one 427-node graph.
+
 ```console
 $ cook build          # Rust + .NET + TypeScript + generated contract, one graph
 $ cook build          # again — reuses the cached compiles, finishes in a fraction of a second
@@ -45,9 +51,13 @@ bundle:  apps/web/app/dist/bundle.js
 - **Cross-language data flow, tracked.** The Rust tool's `menu.json` is consumed
   by *both* the .NET API's tests (via `MENU_JSON`) and the web app
   (`app/src/menu.json`). The Python step turns `contracts/menu-api.yaml` (OpenAPI)
-  into `menuClient.ts`, which is copied into the web client package. Edit the API
-  spec and the TypeScript client regenerates and the bundle rebuilds — a
-  cross-language cascade cook infers from declared inputs and outputs.
+  into `menuClient.ts`; the web client package compiles it and the app bundles it
+  for its live-refresh path. Change an endpoint path in the spec and the typed
+  client regenerates, both TypeScript packages recompile, and the bundle
+  re-bundles — a cross-language cascade cook infers from declared inputs and
+  outputs. Change only a description and the codegen re-runs but emits
+  byte-identical output, so everything downstream stays cached: content-keyed
+  early cutoff at every link of the chain.
 - **A probe that sees the toolchain.** The `stack:versions` probe shells out to
   `dotnet`/`node`/`pnpm`/`cargo`/`python3 --version` and folds the result into the
   build. The same probe value is read two ways in one recipe — as a shell sigil
