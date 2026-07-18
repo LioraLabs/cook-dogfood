@@ -17,6 +17,9 @@ importers:
 
   app:
     dependencies:
+      '@plateboard/client':
+        specifier: workspace:*
+        version: link:../packages/client
       '@plateboard/ui':
         specifier: workspace:*
         version: link:../packages/ui

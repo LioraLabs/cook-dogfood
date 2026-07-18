@@ -32,7 +32,7 @@ recipe menudata
 recipe bundle
     ingredients "app/src/main.ts" "app/tsconfig.json" "app/package.json"
     seal web:tools
-    cook "app/dist/bundle.js" { : $<ui> $<menudata> $<deps> && pnpm --filter @plateboard/app exec esbuild src/main.ts --bundle --format=esm --outfile=dist/bundle.js --log-level=warning }
+    cook "app/dist/bundle.js" { : $<ui> $<client> $<menudata> $<deps> && pnpm --filter @plateboard/app exec esbuild src/main.ts --bundle --format=esm --outfile=dist/bundle.js --log-level=warning }
 
 recipe typecheck
     ingredients pnpm:packages

@@ -1,5 +1,8 @@
 {
   "name": "@plateboard/app",
   "version": "0.0.0",
-  "dependencies": { "@plateboard/ui": "workspace:*" }
+  "dependencies": {
+    "@plateboard/client": "workspace:*",
+    "@plateboard/ui": "workspace:*"
+  }
 }
